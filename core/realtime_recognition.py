@@ -3,17 +3,20 @@ import numpy as np
 import faiss
 import sqlite3
 import json
+import threading
 from deepface import DeepFace
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from backend.main import DB_PATH
+import time
+import argparse
+import requests
 
-
+# --- Config ---
+DB_PATH = "children.db"
 INDEX_PATH = "faiss_index.index"
 ID_MAP_PATH = "id_map.json"
 MODEL_NAME = "Facenet"
-THRESHOLD = 1.0  # L2 distance threshold for normalized embeddings
+THRESHOLD = 0.6  # Use same threshold as backend
+BACKEND_NOTIFY_URL = "http://127.0.0.1:8000/notify_found/"
 
 def l2_normalize(x):
     return x / np.linalg.norm(x)
@@ -62,14 +65,35 @@ def match_embedding(new_emb, index, id_map, threshold=THRESHOLD):
         matched_id = id_map[str(idx)]
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT name, age, contact, image_path FROM children WHERE rowid=?", (matched_id,))
+        c.execute("SELECT name, age, contact, image_path, status FROM children WHERE rowid=?", (matched_id,))
         result = c.fetchone()
         conn.close()
         if result:
-            return {"name": result[0], "age": result[1], "contact": result[2], "image": result[3], "distance": dist}
-    return None
+            return {
+                "matched": True,
+                "id": matched_id,
+                "name": result[0],
+                "age": result[1],
+                "contact": result[2],
+                "image": result[3],
+                "distance": float(dist),
+                "status": result[4]
+            }
+    return {"matched": False}
+
+def notify_backend_found(child_id, distance):
+    data = {"child_id": child_id, "distance": distance}
+    try:
+        resp = requests.post(BACKEND_NOTIFY_URL, json=data)
+        if resp.status_code == 200:
+            print("Backend notified:", resp.json())
+        else:
+            print("Backend notification failed:", resp.status_code)
+    except Exception as e:
+        print("Exception notifying backend:", e)
 
 def start_recognition(camera_source=0):
+    # Load index and map
     if os.path.exists(INDEX_PATH) and os.path.exists(ID_MAP_PATH):
         index = faiss.read_index(INDEX_PATH)
         with open(ID_MAP_PATH) as f:
@@ -94,29 +118,28 @@ def start_recognition(camera_source=0):
             rep = DeepFace.represent(frame_rgb, model_name=MODEL_NAME, enforce_detection=False)
             if rep:
                 new_emb = np.array(rep[0]["embedding"], dtype=np.float32)
-                person = match_embedding(new_emb, index, id_map)
-                if person and person["name"] not in already_detected:
-                    print(f"Detected: {person['name']}, Distance: {person['distance']:.4f}")
-                    already_detected.add(person["name"])
-                    name_display = person["name"]
+                match = match_embedding(new_emb, index, id_map)
+                if match["matched"] and match["id"] not in already_detected:
+                    print(f"Detected: {match['name']} | Distance: {match['distance']:.4f} | Status: {match['status']}")
+                    already_detected.add(match["id"])
+                    notify_backend_found(match["id"], match["distance"])
+                    name_display = f"{match['name']} ({match['status']})"
                 else:
                     name_display = "Unknown"
             else:
-                print("No face detected in frame")
                 name_display = "Unknown"
         except Exception as e:
             print(f"Error generating embedding: {e}")
             name_display = "Unknown"
 
-        cv2.putText(frame, name_display, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(frame, name_display, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                    (0, 255, 0), 2)
         cv2.imshow("Live Face Recognition", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
     cap.release()
     cv2.destroyAllWindows()
-
-import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start real-time face recognition.")
@@ -127,7 +150,5 @@ if __name__ == "__main__":
         help="Camera source. Use 0 for default webcam or IP stream URL."
     )
     args = parser.parse_args()
-
-    # Convert to int if it's a digit (local webcam)
     camera_source = int(args.camera) if args.camera.isdigit() else args.camera
     start_recognition(camera_source=camera_source)

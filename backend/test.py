@@ -30,7 +30,8 @@ CREATE TABLE children (
     age INTEGER,
     contact TEXT,
     image_path TEXT,
-    processed INTEGER DEFAULT 0
+    processed INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'missing'
 )
 """)
 conn.commit()

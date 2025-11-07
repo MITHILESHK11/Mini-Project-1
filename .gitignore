@@ -32,7 +32,7 @@ __pycache__/
 .flaskenv
 
 # Uploaded files (if applicable)
-/uploads/
+uploads/
 
 # Build artifacts
 dist/
